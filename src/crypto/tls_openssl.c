@@ -26,6 +26,8 @@
 #include <openssl/x509v3.h>
 #ifndef OPENSSL_NO_ENGINE
 #include <openssl/engine.h>
+#include <openssl/provider.h>
+#include <openssl/store.h>
 #endif /* OPENSSL_NO_ENGINE */
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
 #include <openssl/core_names.h>
@@ -1236,6 +1238,59 @@ static int tls_is_pin_error(unsigned int err)
 EVP_PKEY * EVP_PKEY_from_keystore(const char *key_id);
 #endif /* ANDROID */
 
+#if !defined(OPENSSL_NO_ENGINE)
+static int tls_provider_init(struct tls_connection *conn, const char *engine_id,
+			     const char *pin, const char *key_id,
+			     const char *cert_id, const char *ca_cert_id)
+{
+	OSSL_STORE_CTX* store = NULL;
+	OSSL_STORE_INFO* info = NULL;
+	int ret = -1;
+
+	if (!OSSL_PROVIDER_load(NULL, "default") || !OSSL_PROVIDER_load(NULL, engine_id)) {
+		wpa_printf(MSG_ERROR, "PROVIDER: failed to load '%s' [%s] ",
+			   engine_id, ERR_error_string(ERR_get_error(), NULL));
+		return ret;
+	};
+
+    wpa_printf(MSG_INFO, "PROVIDER: '%s' loaded", engine_id);
+
+	if (key_id) {
+		store = OSSL_STORE_open(key_id, NULL, NULL, NULL, NULL);
+		if (!store) {
+			wpa_printf(MSG_ERROR, "PROVIDER: failed to open store for  '%s' [%s] ",
+			key_id, ERR_error_string(ERR_get_error(), NULL));
+			goto err;
+		}
+
+		info = OSSL_STORE_load(store);
+		if (!info) {
+			wpa_printf(MSG_ERROR, "PROVIDER: failed to fetch '%s' [%s] ",
+			key_id, ERR_error_string(ERR_get_error(), NULL));
+			goto err;
+		}
+
+		conn->private_key = OSSL_STORE_INFO_get1_PKEY(info);
+		if (!conn->private_key) {
+			wpa_printf(MSG_ERROR,
+				   "PROVIDER: cannot load private key with id '%s' [%s]",
+				   key_id,
+				   ERR_error_string(ERR_get_error(), NULL));
+			goto err;
+		}
+
+		wpa_printf(MSG_INFO, "PROVIDER: key '%s' loaded", key_id);
+	}
+
+	ret = 0;
+
+err:
+	OSSL_STORE_INFO_free(info);
+	OSSL_STORE_close(store);
+	return ret;
+}
+#endif /* OPENSSL_NO_ENGINE */
+
 static int tls_engine_init(struct tls_connection *conn, const char *engine_id,
 			   const char *pin, const char *key_id,
 			   const char *cert_id, const char *ca_cert_id)
@@ -1258,6 +1313,10 @@ static int tls_engine_init(struct tls_connection *conn, const char *engine_id,
 #endif /* ANDROID && OPENSSL_IS_BORINGSSL */
 
 #ifndef OPENSSL_NO_ENGINE
+	/* Load the given OpenSSL 'provider' instead of an 'engine */
+	if (os_strncmp(engine_id, "provider:", 9) == 0)
+		return tls_provider_init(conn, engine_id + 9, pin, key_id, cert_id, ca_cert_id);
+
 	int ret = -1;
 	if (engine_id == NULL) {
 		wpa_printf(MSG_ERROR, "ENGINE: Engine ID not set");
